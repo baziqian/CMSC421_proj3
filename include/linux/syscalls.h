@@ -1371,4 +1371,11 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
 		int __user *optlen);
 int __sys_setsockopt(int fd, int level, int optname, char __user *optval,
 		int optlen);
+
+
+asmlinkage long sys_init_buffer_421(void);
+asmlinkage long sys_enqueue_buffer_421(char *data);
+asmlinkage long sys_dequeue_buffer_421(char *data);
+asmlinkage long sys_delete_buffer_421(void);
+
 #endif

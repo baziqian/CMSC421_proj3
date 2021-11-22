@@ -1,130 +1,134 @@
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <pthread.h>
+#include <linux/kernel.h>
+#include <linux/syscalls.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/semaphore.h>
 
 #include "buffer.h"
 
 #define NULL_CHAR '\0'
 
 static ring_buffer_421_t buffer;
-static sem_t mutex;
-static sem_t fill_count;
-static sem_t empty_count;
+
+// Define/initialize the semaphores we want to use
+DEFINE_SEMAPHORE(mutex);
+struct semaphore fill_count = __SEMAPHORE_INITIALIZER(fill_count, 0);
+struct semaphore empty_count = __SEMAPHORE_INITIALIZER(empty_count, SIZE_OF_BUFFER);
 
 
-long init_buffer_421(void) {
+SYSCALL_DEFINE0(init_buffer_421) {
 	// Ensure we're not initializing a buffer that already exists.
 	if (buffer.read || buffer.write) {
-		printf("init_buffer_421(): Buffer already exists. Aborting.\n");
+		printk("init_buffer_421(): Buffer already exists. Aborting.\n");
 		return -1;
 	}
 
 	// Create the root node.
 	node_421_t *node;
-	node = (node_421_t *) malloc(sizeof(node_421_t));
+	node = (node_421_t *)kmalloc(sizeof(node_421_t), GFP_KERNEL);
+	
 	// Create the rest of the nodes, linking them all together.
-	node_421_t *current;
+	node_421_t *curr_node;
 	int i;
-	current = node;
+	curr_node = node;
 	// Note that we've already created one node, so i = 1.
 	for (i = 1; i < SIZE_OF_BUFFER; i++) {
-		current->next = (node_421_t *) malloc(sizeof(node_421_t));
-		current = current->next;
+		curr_node->next = (node_421_t *)kmalloc(sizeof(node_421_t), GFP_KERNEL);
+		curr_node = curr_node->next;
 	}
 	// Complete the chain.
-	current->next = node;
+	curr_node->next = node;
 	buffer.read = node;
 	buffer.write = node;
 	buffer.length = 0;
-
-	// Initialize semaphores
-	sem_init(&mutex, 0, 1);
-	sem_init(&fill_count, 0, 0);  // No data in buffer yet
-	sem_init(&empty_count, 0, SIZE_OF_BUFFER);  // Buffer is empty
 
 	return 0;
 }
 
 
-long enqueue_buffer_421(char * data) {
+SYSCALL_DEFINE1(enqueue_buffer_421, char*, data) {
 	if (!buffer.write) {
-		printf("The buffer does not exist. Aborting.\n");
+		printk("enqueue_buffer_421(): The buffer does not exist. Aborting.\n");
 		return -1;
 	}
 	// Decrement mutex semaphore to 0 and empty_count by 1 for new data space
-	sem_wait(&empty_count);
-	sem_wait(&mutex);
+	down(&empty_count);
+	down(&mutex);
 	
 	// Copy 1024 bytes of data into write node's data
-	memcpy(buffer.write->data, data, DATA_LENGTH);
+	copy_from_user(buffer.write->data, data, DATA_LENGTH);
 	
 	// Advance the write pointer
 	buffer.write = buffer.write->next;
 	buffer.length++;
 
 	// Increment mutex semaphore back to 1 and fill_count by 1
-	sem_post(&mutex);
-	sem_post(&fill_count);
+	up(&mutex);
+	up(&fill_count);
 	
 	return 0;
 }
 
 
-long dequeue_buffer_421(char * data) {
+SYSCALL_DEFINE1(dequeue_buffer_421, char*, data) {
 	// Cannot dequeue from an uninstantiated buffer
 	if (!buffer.read) {
-		printf("The buffer does not exist. Aborting.\n");
+		printk("dequeue_buffer_421(): The buffer does not exist. Aborting.\n");
 		return -1;
 	}
-	// Change mutex back to 0
-	sem_wait(&fill_count);
-	sem_wait(&mutex);
+	
+	// Decrement the fill_count and change mutex back to 0
+	down(&fill_count);
+	down(&mutex);
 	
 	// Copy data from read pointer to data argument and clear old data
-	memcpy(data, buffer.read->data, DATA_LENGTH);
+	copy_to_user(data, buffer.read->data, DATA_LENGTH);
 	memset(buffer.read->data, NULL_CHAR, DATA_LENGTH);
 	
 	// Advance the read pointer and decrease the buffer length
 	buffer.read = buffer.read->next;
 	buffer.length--;
 	
-	// Change mutex back to 1
-	sem_post(&mutex);
-	sem_post(&empty_count);
+	// Increment the empty count and change mutex back to 1
+	up(&mutex);
+	up(&empty_count);
 	
 	return 0;
 }
 
 
-long delete_buffer_421(void) {
+SYSCALL_DEFINE0(delete_buffer_421) {
 	// Tip: Don't call this while any process is waiting to enqueue or dequeue.
-	if (!buffer.read) {
-		printf("delete_buffer_421(): The buffer does not exist. Aborting.\n");
+	if (buffer.read) {
+		// Get rid of all existing nodes.
+		node_421_t *temp;
+		node_421_t *curr_node;
+		
+		curr_node = buffer.read->next;
+		while (curr_node != buffer.read) {
+			temp = curr_node->next;
+			kfree(curr_node);
+			curr_node = temp;
+		}
+		
+		// Free the final node.
+		kfree(curr_node);
+		curr_node = NULL;
+
+		// Reset the buffer.
+		buffer.read = NULL;
+		buffer.write = NULL;
+		buffer.length = 0;
+		
+		return 0;
+	} 
+	else { // If buffer.read is NULL, print error and return -1
+		printk("delete_buffer_421(): The buffer does not exist. Aborting.\n");
 		return -1;
 	}
-	// Get rid of all existing nodes.
-	node_421_t *temp;
-	node_421_t *current = buffer.read->next;
-	while (current != buffer.read) {
-		temp = current->next;
-		free(current);
-		current = temp;
-	}
-	
-	// Free the final node.
-	free(current);
-	current = NULL;
-
-	// Reset the buffer.
-	buffer.read = NULL;
-	buffer.write = NULL;
-	buffer.length = 0;
-	
-	return 0;
 }
 
-
+/*
 void print_semaphores(void) {
 	// You can call this method to check the status of the semaphores.
 	// Don't forget to initialize them first!
@@ -138,4 +142,6 @@ void print_semaphores(void) {
 	printf("sem_t empty_count = %d\n", value);
 	return;
 }
+*/
+
 
